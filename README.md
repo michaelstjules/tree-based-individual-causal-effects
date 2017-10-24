@@ -20,7 +20,7 @@ Chipman, Hugh A, Edward I George, Robert E McCulloch, and others. 2010. “BART:
 Regression Trees.” The Annals of Applied Statistics 4 (1). Institute of Mathematical Statistics: 266–98.
 Chipman, Hugh, and Robert McCulloch. 2016. BayesTree: Bayesian Additive Regression Trees. https://CRAN.R-project.org/package=BayesTree.
 
-Hill, Jennifer. 2016. “2016 Atlantic Causal Inference Conference Competition: Is Your Satt Where It’s at?”
+Hill, Jennifer. 2016. “2016 Atlantic Causal Inference Conference Competition: Is Your SATT Where It’s At?”
 2016 Atlantic Causal Inference Conference. http://jenniferhill7.wixsite.com/acic-2016/competition.
 
 Hill, Jennifer L. 2011. “Bayesian Nonparametric Modeling for Causal Inference.” Journal of Computational
