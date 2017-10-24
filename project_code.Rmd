@@ -1,0 +1,690 @@
+---
+title: "CM 764 - Project: Evaluating Some Tree-Based Methods for the Estimation of Individual Causal Effects on Semi-Simulated Data from a Crossover Study"
+author: "Michael St. Jules"
+date: "April 2017"
+output: pdf_document
+header-includes:
+- \usepackage{graphicx}
+- \usepackage{color}
+- \usepackage{hyperref}
+- \usepackage{epic}
+- \usepackage{amssymb, amsfonts, amsmath, textcomp, enumerate, amsthm, tikz}
+- \PassOptionsToPackage{pdfmark}{hyperref}\RequirePackage{hyperref}
+- \newcommand{\tr}[1]{{#1}^{\mkern-1.5mu\mathsf{T}}}
+- \renewcommand{\bf}[1]{\mathbf{#1}}
+---
+
+```{r}
+load("~/Desktop/CM 764/Project/data_variables.RData")
+```
+
+Prepare the data:
+
+```{r}
+#data = X02961_0001_Data
+library(haven)
+data <- read_por("~/Desktop/CM 764/Project/Pepper_spray/ICPSR_02961/DS0001/02961-0001-Data.por")
+#fix directory so it doesn't depend on my computer
+
+#View(data)
+
+#For each subject, replace their baseline vital measurements 
+# (they repeat the measurements before each trial)
+# with their minimum baseline over all trials. 
+# This should hopefully take care of some treatment order effects
+
+#The covariates are:
+#BTV       "BASELINE TIDAL VOLUME"                                         
+#BRR       "BASELINE RESPIRATORY RATE"                                     
+#BHR       "BASELINE HEART RATE"  
+#BSBP      "BASELINE SYSTOLIC BLOOD PRESSURE"                              
+#BDBP      "BASELINE DIASTOLIC BLOOD PRESSURE"                             
+#BMAP      "BASELINE MEAN ARTERIAL PRESSURE"
+
+# The covariates (dependent variables) will consist of the above (modified), and 
+#AGE       "AGE OF SUBJECT"                                                
+#SEX       "GENDER OF SUBJECT"                                             
+#ETH       "ETHNICITY OF SUBJECT"                                          
+                                     
+#PMH       "PAST MEDICAL HISTORY"                                          
+#TOB       "TOBACCO USE HISTORY"                                           
+#MED       "HISTORY OF MEDICATION USE"   
+
+for (subj in data$SUBJ){
+  data$BTV[data$SUBJ==subj] <- min(data$BTV[data$SUBJ==subj])
+  data$BRR[data$SUBJ==subj] <- min(data$BRR[data$SUBJ==subj])
+  data$BHR[data$SUBJ==subj] <- min(data$BHR[data$SUBJ==subj])
+  data$BSBP[data$SUBJ==subj] <- min(data$BSBP[data$SUBJ==subj])
+  data$BDBP[data$SUBJ==subj] <- min(data$BDBP[data$SUBJ==subj])
+  data$BMAP[data$SUBJ==subj] <- min(data$BMAP[data$SUBJ==subj])
+}
+
+#View(data)
+
+x.test <- data[c("SUBJ", "AGE", "SEX", "ETH", "HT", "WT", "BMI", "PMH", "TOB", "MED", "BTV", 
+            "BRR", "BHR", "BSBP", "BDBP", "BMAP")] #baseline covariates
+# but also SUBJ, for convenience, but SUBJ will be removed later
+x <- unique(x.test) #get rid of duplicated rows
+
+#test data x values to produce predicted y's
+x.test <- cbind(x.test[,names(x)!="SUBJ"], EXP=data$EXP, POS=data$POS)
+```
+
+
+
+```{r}
+# View histograms for the baseline covariates corresponding to response covariates
+# We want to predict the response on the same power-scale as the corresponding
+# baseline covariate, so rather than applying power transformations 
+# guided by the skew of the response, which may lead to overfitting to the 
+# particular biased treatment assignment, we check for skew in the corresponding
+# baseline covariates. Furthermore, many of these variables have been observed 
+# to be roughly normally distributed in the general population
+# It's only worth doing the power transform if we're trying to predict TV after treatment
+# since trees are invariant under monotone transformations to the data
+par(mfrow=c(2,3))
+hist.default(x$BRR) #pretty well normal
+hist.default(x$BHR) #symmetric but possibly two-modal
+hist.default(x$BSBP) #pretty well normal
+hist.default(x$BDBP) #pretty well normal
+hist.default(x$BMAP) #pretty well normal
+hist.default(x$BTV) #slightly right-skewed (right-tailed)
+# a power transform of ~0.5 would fix this
+hist.default(x$BTV^0.5)
+```
+
+
+
+Now, define the simulated treatment assignment mechanism and how to sample from the data:
+```{r}
+# First, some global variables to avoid recomputing
+max.AGE <- max(x$AGE)
+min.AGE <- min(x$AGE)
+max.WT <- max(x$WT)
+min.WT <- min(x$WT)
+#the log probability of EXP=1 will be linear (affine) in the following
+exponent <- 3*(max.AGE-x$AGE)/(max.AGE-min.AGE) + (x$WT-min.WT)/(max.WT-min.WT) + 
+  5*(x$SEX==1) + 3*(x$ETH==2) + 2*(x$ETH==3) + 5*(x$TOB == 2) +
+  3*((max.AGE-x$AGE)/(max.AGE-min.AGE)+1)*(3*(x$ETH==2)+2*(x$ETH==3))*
+  (3*(x$SEX==1)+1)*(x$TOB == 2)
+max.exponent <- max(exponent)
+min.exponent <- min(exponent)
+#i.e. log p(EXP=1) = a*exponent+b
+#want max prob of EXP==1 to be 1/5, min to be 1/18, so fit a line:
+#slope
+a.EXP = (log(1/5)-log(1/18))/(max.exponent-min.exponent)
+#intercept
+b.EXP = log(1/5) - a.EXP*max.exponent
+
+#log p(POS=1|EXP) = a*(exponent+2*EXP)+b
+#want max prob to be 3/4, min to be 1/10
+#slope
+a.POS_EXP = (log(3/4)-log(1/10))/(max.exponent+2-min.exponent) #2 for 2*EXP
+#intercept
+b.POS_EXP = log(3/4) - a.POS_EXP*(max.exponent+2) #2 for 2*EXP
+
+pEXP1 <- function(){
+  exp(a.EXP*exponent+b.EXP)
+}
+
+pPOS1_EXP <- function(EXP){
+  exp(a.POS_EXP*(exponent+EXP)+b.POS_EXP) #this was supposed to be
+  #exponent+2*EXP, but it's too late to fix now
+  #the distribution below is still a valid distribution
+}
+
+#sample treatments for each subject
+treatment_dist <- function(x){
+  x.EXP <- as.integer(runif(nrow(x)) <= pEXP1())
+  x.POS <- as.integer(runif(nrow(x)) <= pPOS1_EXP(x.EXP))
+  data.frame(EXP=x.EXP,POS=x.POS)
+  # At least three possibilities for dealing with missing treatments in data:
+  # (1) not care that some responses will be missing for some treatments (OK for trees?)
+  # (2) keep reassigning until a valid treatment is obtained
+  # (3) "round" to the nearest treatment:
+  # If (0,0) or (1,1) is obtained but missing, flip a coin between (1,0) and (0,1),
+  #  favouring (0,1) (e.g. 2/3) ?
+  # If (0,1) or (1,0) is obtained but missing, flip to the other
+  
+  # For now, I'm using (1)
+}
+
+
+#RESPONSE
+getSample <- function(y_name="RR_1", x.=x, data.=data, 
+                      t=NA, treatment_dist.=treatment_dist){
+  if(is.na(t)){
+     t <- treatment_dist.(x.)
+  }
+  y <- numeric(nrow(x.))
+  y[] <- NA #fill with NAs
+  j <- 1 #index in x
+  #note that rows appear in the same order (increasing by SUBJ) in both x and data
+  for(i in 1:nrow(data.)){
+    if(data.[i,"SUBJ"]==x.[j,"SUBJ"] & all(data.[i, c("EXP","POS")] == t[j,c("EXP","POS")]))
+      y[j] <- as.double(data.[i,y_name])
+    if(i < nrow(data.) & data.[i+1, "SUBJ"] != x.[j,"SUBJ"]){ 
+      j <- j+1
+    }
+  }
+    
+  cbind(x.[,names(x.) != "SUBJ"],t,y) #remove SUBJ
+  #should x and t be combined into one variable?
+}
+
+```
+
+At the very least, it's clear that the treatment assingment is not uniform:
+
+```{r}
+# marginal probability of EXP=1 (i.e. being pepper sprayed)
+mean(sapply(1:5000, FUN=function(j){mean(treatment_dist(x)$EXP)}))
+# marginal probability of POS=1 (i.e. being restrained)
+mean(sapply(1:5000, FUN=function(j){mean(treatment_dist(x)$POS)}))
+```
+
+
+```{r}
+ave_mu_mu_sq <- function(predfun1, predfun2, x){
+  mean((predfun1(x) - predfun2(x))^2)
+}
+
+#Average difference between the predictions of a function and a vector of values
+ave_mu_y_sq <- function(predfun, y, x){
+  #here y is a vector with length=#rows of x
+  # y is typically the true response
+  mean((predfun(x) - y)^2)
+}
+#or from notes:
+#ave_y_mu_sq <- function(sample, predfun){
+#mean(abs(sample$y - predfun(sample$x))^2)
+#}
+
+getmubar <- function(muhats){
+  function(x) {
+    Ans <- sapply(muhats, FUN=function(muhat){muhat(x)})
+    apply(Ans, MARGIN=1, FUN=mean)
+  }
+}
+
+
+var_mutilde <- function(Ssamples, TestSet, df, getmuhat){ #pass getmuhat as an argument
+  # get the predictor function for every sample S
+  muhats <- lapply(Ssamples, 
+                   FUN=function(sample){
+                     getmuhat(sample, df=df)
+                   }
+  )
+  # get the average of these, mubar
+  mubar <- getmubar(muhats)
+  
+  # average over all samples S
+  N_S <- length(Ssamples)
+  mean(sapply(1:N_S, 
+              FUN=function(j){
+                # get muhat based on sample S_j
+                muhat <- muhats[[j]]
+                #S_j <- Ssamples[[j]] #not used
+                # average over (x_i,y_i) in the
+                # TestSet the squares
+                # (y - muhat(x))^2
+                ave_mu_mu_sq(muhat, mubar, TestSet)
+              }
+  )
+  )
+}
+
+
+#for a single test set
+bias2_mutilde <- function(Ssamples, TestSet, y, df, getmuhat){
+  # get the predictor function for every sample S
+  muhats <- lapply(Ssamples, 
+                   FUN=function(sample) getmuhat(sample, df=df)
+  )
+  # get the average of these, mubar
+  mubar <- getmubar(muhats)
+  
+  # average over all samples S
+  N_S <- length(Ssamples)
+  mean(sapply(1:N_S, 
+              FUN=function(j){
+                # average over (x_i,y_i) in a
+                # single sample T_j the squares
+                # (y - muhat(x))^2
+                ave_mu_y_sq(mubar, y, TestSet) 
+                # the (x_i,z_i) are unique, so, there's no point in taking the average of y
+                # and the variance of y for each (x,z) will be estimated to be 0. 
+              }
+  )
+  )
+}
+
+#for a single test set
+bias.variance <- function(Ssamples, TestSet, y, df, getmuhat){
+  # average over the samples S
+  # 
+  N_S <- length(Ssamples)
+  muhats <- lapply(Ssamples, 
+                   FUN=function(sample) getmuhat(sample, df=df)
+  )
+  # get the average of these, mubar
+  mubar <- getmubar(muhats)
+  
+  rowMeans(sapply(1:N_S, 
+                  FUN=function(j){
+                    muhat <- muhats[[j]]
+                    muhat_x <- muhat(TestSet)
+                    mubar_x <- mubar(TestSet)
+                    #apse <- (y - muhat_x)
+                    bias2 <- (mubar_x - y)
+                    var_mutilde <-  (muhat_x - mubar_x)
+                    # Put them together and square them
+                    squares <- rbind(bias2, var_mutilde)^2
+                    # return means
+                    rowMeans(squares) #can get apse from their sum
+                  }
+  ))
+}
+```
+
+
+```{r, echo=FALSE, eval=FALSE}
+#for multiple test sets
+var_mutilde2 <- function(Ssamples, Tsamples, df, getmuhat){
+  # get the predictor function for every sample S
+  muhats <- lapply(Ssamples, 
+                   FUN=function(sample){
+                     getmuhat(sample, df=df)
+                   }
+  )
+  # get the average of these, mubar
+  mubar <- getmubar(muhats)
+  
+  # average over all samples S
+  N_S <- length(Ssamples)
+  mean(sapply(1:N_S, 
+              FUN=function(j){
+                # get muhat based on sample S_j
+                muhat <- muhats[[j]]
+                S_j <- Ssamples[[j]]
+                # average over (x_i,y_i) in a
+                # single sample T_j the squares
+                # (y - muhat(x))^2
+                T_j <- Tsamples[[j]]
+                ave_mu_mu_sq(muhat, mubar, T_j$x)
+              }
+  )
+  )
+}
+
+
+# for multiple test sets
+bias2_mutilde2 <- function(Ssamples, Tsamples, df, getmuhat){
+  # get the predictor function for every sample S
+  muhats <- lapply(Ssamples, 
+                   FUN=function(sample) getmuhat(sample, df=df)
+  )
+  # get the average of these, mubar
+  mubar <- getmubar(muhats)
+  
+  # average over all samples S
+  N_S <- length(Ssamples)
+  mean(sapply(1:N_S, 
+              FUN=function(j){
+                # average over (x_i,y_i) in a
+                # single sample T_j the squares
+                # (y - muhat(x))^2
+                T_j <- Tsamples[[j]]
+                ave_mu_y_sq(mubar, T_j$y, T_j$x)
+              }
+  )
+  )
+}
+```
+
+
+Get samples
+
+## Want 100 samples???
+
+```{r}
+set.seed(314159)
+TrainingSets <- lapply(1:50, FUN= function(i){
+  na.omit(getSample(y_name="RR_1", x.=x, data.=data, treatment_dist.=treatment_dist))
+  }
+)
+present_ys <- complete.cases(data$RR_1) #RESPONSE
+```
+
+
+
+## BART
+
+```{r}
+library(BayesTree)
+#present_ys <- complete.cases(data$HR_1)
+getmuhat.BART <- function(sample, df){
+  muhat <- function(x){bart(x.train=sample[,names(sample)!="y"], y.train=sample$y,
+                            x.test=x,verbose=FALSE)$yhat.test.mean}
+}
+
+#would like to use usequants=FALSE for treatment variables, but true for everything else?
+# FALSE by default; also try TRUE?
+# since only 2x2 binary treatments, it's fine to use usequants=TRUE
+#Is there a way to set a maximum iteration number (and either stop early and keep the result
+# or restart?)
+# numcut? 
+```
+
+
+```{r, echo=FALSE, eval=FALSE}
+#present_ys <- complete.cases(data$HR_1)
+sample <- getSample()
+sample <- sample[complete.cases(sample),] 
+# it seems the BART algorithm doesn't handle NA y-values; get
+#  "Error in lm.fit(x, y, offset = offset, singular.ok = singular.ok, ...) :
+#  0 (non-NA) cases"
+test.BART <- bart(sample[,names(sample)!="y"], y.train=sample$y, x.test=x.test[present_ys,])
+c(data[present_ys,"RR_1"]-test.BART$yhat.test.mean) #RESPONSE
+```
+
+
+
+```{r}
+#present_ys <- complete.cases(data$RR_1) #RESPONSE
+#df is unused
+#bias.BART <- bias2_mutilde(TrainingSets, x.test[present_ys,], data$HR_1[present_ys], df=2, getmuhat.BART)
+#var.BART <- var_mutilde(TrainingSets, x.test[present_ys,], df=2, getmuhat.BART)
+bias.variance.BART.RR_1 <- bias.variance(TrainingSets, x.test[present_ys,], data$RR_1[present_ys], df=2, getmuhat.BART) #RESPONSE
+```
+
+
+
+
+## BART with quantile splitting
+
+```{r}
+library(BayesTree)
+#present_ys <- complete.cases(data$HR_1)
+getmuhat.BART2 <- function(sample, df){
+  muhat <- function(x){bart(x.train=sample[,names(sample)!="y"], y.train=sample$y,
+                            x.test=x,verbose=FALSE, usequants=TRUE)$yhat.test.mean}
+}
+```
+
+
+```{r, echo=FALSE, eval=FALSE}
+set.seed(314159)
+TrainingSets2 <- lapply(1:10, FUN= function(i){
+  na.omit(getSample(y_name="RR_1", x.=x, data.=data, treatment_dist.=treatment_dist))
+  }
+)
+```
+
+
+```{r}
+#present_ys <- complete.cases(data$HR_1)
+#df is unused
+#bias.BART <- bias2_mutilde(TrainingSets, x.test[present_ys,], data$HR_1[present_ys], df=2, getmuhat.BART)
+#var.BART <- var_mutilde(TrainingSets, x.test[present_ys,], df=2, getmuhat.BART)
+bias.variance.BART2.RR_1 <- bias.variance(TrainingSets, x.test[present_ys,], data$RR_1[present_ys], df=2, getmuhat.BART2) #RESPONSE
+```
+
+
+
+
+
+## Synthetic forests
+
+```{r}
+library(randomForestSRC)
+getmuhat.synth <- function(sample, df){
+  muhat <- function(x){rfsrcSyn(y ~ ., data=sample, newdata=x,
+                                verbose=FALSE)$rfSynPred$predicted}
+}
+```
+
+```{r, echo=FALSE, eval=FALSE}
+#present_ys <- complete.cases(data$HR_1)
+sample <- getSample()
+sample <- sample[complete.cases(sample),] 
+test.synth <- rfsrcSyn(y ~ ., data=sample, newdata=x.test[present_ys,])
+c(data[present_ys,"RR_1"]-test.synth$rfSynPred$predicted) #RESPONSE
+#test.synth$rfSynPred$
+```
+
+```{r}
+#present_ys <- complete.cases(data$HR_1)
+#df is unused
+#bias.synth <- bias2_mutilde(TrainingSets, x.test[present_ys,], data$HR_1[present_ys], df=2, getmuhat.synth)
+#var.synth <- var_mutilde(TrainingSets, x.test[present_ys,], df=2, getmuhat.synth)
+bias.variance.synth.RR_1 <- bias.variance(TrainingSets, x.test[present_ys,], data$RR_1[present_ys], df=2, getmuhat.synth) #RESPONSE
+```
+
+
+## synCF
+
+```{r}
+library(randomForestSRC)
+getmuhat.synCF <- function(sample, df){
+  muhat <- function(x){
+    y <- numeric(nrow(x))
+    # If there's no data for a particular treatment group in the sample,
+    # just use all of the data in the sample
+    if(sum(sample$EXP==0 & sample$POS==0)>0){
+    y[x$EXP==0 & x$POS==0] <- rfsrcSyn(y ~ ., data=sample[sample$EXP==0 & sample$POS==0,],
+                                       newdata=x[x$EXP==0 & x$POS==0,],
+                                       verbose=FALSE)$rfSynPred$predicted
+    }
+    else{
+    y[x$EXP==0 & x$POS==0] <- rfsrcSyn(y ~ ., data=sample, newdata=x[x$EXP==0 & x$POS==0,],
+                                       verbose=FALSE)$rfSynPred$predicted
+    }
+    
+    if(sum(sample$EXP==1 & sample$POS==0)>0){
+    y[x$EXP==1 & x$POS==0] <- rfsrcSyn(y ~ ., data=sample[sample$EXP==1 & sample$POS==0,],
+                                       newdata=x[x$EXP==1 & x$POS==0,],
+                                       verbose=FALSE)$rfSynPred$predicted
+    }
+    else{
+    y[x$EXP==1 & x$POS==0] <- rfsrcSyn(y ~ ., data=sample, newdata=x[x$EXP==1 & x$POS==0,],
+                                       verbose=FALSE)$rfSynPred$predicted
+    }
+    
+    if(sum(sample$EXP==0 & sample$POS==1)>0){
+    y[x$EXP==0 & x$POS==1] <- rfsrcSyn(y ~ ., data=sample[sample$EXP==0 & sample$POS==1,],
+                                       newdata=x[x$EXP==0 & x$POS==1,],
+                                       verbose=FALSE)$rfSynPred$predicted
+    }
+    else{
+    y[x$EXP==0 & x$POS==1] <- rfsrcSyn(y ~ ., data=sample, newdata=x[x$EXP==0 & x$POS==1,],
+                                       verbose=FALSE)$rfSynPred$predicted
+    }
+    
+    if(sum(sample$EXP==1 & sample$POS==1)>0){
+    y[x$EXP==1 & x$POS==1] <- rfsrcSyn(y ~ ., data=sample[sample$EXP==1 & sample$POS==1,],
+                                       newdata=x[x$EXP==1 & x$POS==1,],
+                                       verbose=FALSE)$rfSynPred$predicted
+    }
+    else{
+    y[x$EXP==1 & x$POS==1] <- rfsrcSyn(y ~ ., data=sample, newdata=x[x$EXP==1 & x$POS==1,],
+                                       verbose=FALSE)$rfSynPred$predicted
+    }
+    y
+  }
+}
+```
+
+
+```{r}
+#present_ys <- complete.cases(data$HR_1)
+#df is unused
+#bias.synCF <- bias2_mutilde(TrainingSets, x.test[present_ys,], data$HR_1[present_ys], df=2, getmuhat.synCF)
+#var.synCF <- var_mutilde(TrainingSets, x.test[present_ys,], df=2, getmuhat.synCF)
+bias.variance.synCF.RR_1 <- bias.variance(TrainingSets, x.test[present_ys,], data$RR_1[present_ys], df=2, getmuhat.synCF) #RESPONSE
+```
+
+
+
+
+
+
+
+## BART with synthetic features
+
+```{r}
+library(BayesTree)
+library(randomForestSRC)
+getmuhat.BARTsynth <- function(sample, df){
+  muhat <- function(x){
+    BARTsynth.forests <- rfsrcSyn(y ~ ., data=sample, newdata=x.test[present_ys,],
+                                   verbose=FALSE)
+    BARTsynth <- bart(x.train=BARTsynth.forests$rfSyn$xvar, y.train=sample$y,
+                       x.test=BARTsynth.forests$rfSynPred$xvar, verbose=FALSE,
+                       usequants=FALSE)
+    BARTsynth$yhat.test.mean
+  }
+}
+#use usequants=TRUE ??
+```
+
+
+```{r, echo=FALSE, eval=FALSE}
+#present_ys <- complete.cases(data$HR_1)
+sample <- getSample()
+sample <- sample[complete.cases(sample),]
+BARTsynth.forests <- rfsrcSyn(y ~ ., data=sample, newdata=x.test[present_ys,], verbose=FALSE)
+BARTsynth <- bart(x.train=BARTsynth.forests$rfSyn$xvar, y.train=sample$y,
+                   x.test=BARTsynth.forests$rfSynPred$xvar, verbose=FALSE, usequants=FALSE)
+mean((BARTsynth$yhat.test.mean-data$RR_1[present_ys])^2) #RESPONSE
+```
+
+
+
+```{r, echo=FALSE, eval=FALSE}
+set.seed(314159)
+TrainingSets2 <- lapply(1:50, FUN= function(i){
+  na.omit(getSample(y_name="RR_1", x.=x, data.=data, treatment_dist.=treatment_dist))
+  }
+)
+```
+
+```{r}
+#present_ys <- complete.cases(data$HR_1)
+#df is unused
+#bias.synCF <- bias2_mutilde(TrainingSets, x.test[present_ys,], data$HR_1[present_ys], df=2, getmuhat.synCF)
+#var.synCF <- var_mutilde(TrainingSets, x.test[present_ys,], df=2, getmuhat.synCF)
+bias.variance.BARTsynth.RR_1 <- bias.variance(TrainingSets, x.test[present_ys,],
+                                         data$RR_1[present_ys], df=2, getmuhat.BARTsynth) #RESPONSE
+```
+
+
+
+
+## BART with synthetic features and usequants=TRUE
+
+```{r}
+library(BayesTree)
+library(randomForestSRC)
+getmuhat.BARTsynth2 <- function(sample, df){
+  muhat <- function(x){
+    BARTsynth.forests <- rfsrcSyn(y ~ ., data=sample, newdata=x.test[present_ys,],
+                                   verbose=FALSE)
+    BARTsynth <- bart(x.train=BARTsynth.forests$rfSyn$xvar, y.train=sample$y,
+                       x.test=BARTsynth.forests$rfSynPred$xvar, verbose=FALSE,
+                       usequants=TRUE)
+    BARTsynth$yhat.test.mean
+  }
+}
+#use usequants=TRUE ??
+```
+
+
+```{r, echo=FALSE, eval=FALSE}
+set.seed(314159)
+TrainingSets2 <- lapply(1:50, FUN= function(i){
+  na.omit(getSample(y_name="RR_1", x.=x, data.=data, treatment_dist.=treatment_dist))
+  }
+)
+```
+
+```{r}
+#present_ys <- complete.cases(data$HR_1)
+#df is unused
+#bias.synCF <- bias2_mutilde(TrainingSets, x.test[present_ys,], data$HR_1[present_ys], df=2, getmuhat.synCF)
+#var.synCF <- var_mutilde(TrainingSets, x.test[present_ys,], df=2, getmuhat.synCF)
+bias.variance.BARTsynth2.RR_1 <- bias.variance(TrainingSets, x.test[present_ys,],
+                                         data$RR_1[present_ys], df=2, getmuhat.BARTsynth2) #RESPONSE
+```
+
+
+```{r, echo=FALSE, eval=FALSE}
+# Export -> Save as PDF -> 5x7 in
+bias.variances <- t(cbind(bias.variance.BART, bias.variance.BART2, bias.variance.synth, bias.variance.synCF, bias.variance.BARTsynth, bias.variance.BARTsynth2))
+names <- c("BART", "BART2", "synth", "synCF", "BARTsynth", "BARTsynth2")
+rownames(bias.variances) <- names
+colnames(bias.variances) <- c("bias2", "variance")
+plot(bias.variances, xlab="average squared bias", main="variance vs bias of estimators predicting HR_1", xaxp=c(floor(min(bias.variances[,1]))-2, ceiling(max(bias.variances[,1]))+3, 10))
+text(bias.variances, labels = names, pos = c(4,4,1,4,4,1))
+bias.variance.APSE = cbind(bias.variances, APSE=bias.variances[,1]+bias.variances[,2])
+```
+
+```{r, echo=FALSE, eval=FALSE}
+bias.variances.DBP_3 <- t(cbind(bias.variance.BART.DBP_3, bias.variance.BART2.DBP_3, bias.variance.synth.DBP_3, bias.variance.synCF.DBP_3, bias.variance.BARTsynth.DBP_3, bias.variance.BARTsynth2.DBP_3))
+names <- c("BART", "BART2", "synth", "synCF", "BARTsynth", "BARTsynth2")
+rownames(bias.variances.DBP_3) <- names
+colnames(bias.variances.DBP_3) <- c("bias2", "variance")
+plot(bias.variances.DBP_3, xlab="average squared bias", main="variance vs bias of estimators predicting DBP_3", xlim = c(89, 113), xaxp=c(90, 112, 22))
+text(bias.variances.DBP_3, labels = names, pos = c(4,2,2,4,4,3))
+bias.variance.APSE.DBP_3 = cbind(bias.variances.DBP_3, APSE=bias.variances.DBP_3[,1]+bias.variances.DBP_3[,2])
+```
+
+```{r, echo=FALSE, eval=FALSE}
+bias.variances.MAP_3 <- t(cbind(bias.variance.BART.MAP_3, bias.variance.BART2.MAP_3, bias.variance.synth.MAP_3, bias.variance.synCF.MAP_3, bias.variance.BARTsynth.MAP_3, bias.variance.BARTsynth2.MAP_3))
+names <- c("BART", "BART2", "synth", "synCF", "BARTsynth", "BARTsynth2")
+rownames(bias.variances.MAP_3) <- names
+colnames(bias.variances.MAP_3) <- c("bias2", "variance")
+plot(bias.variances.MAP_3, xlab="average squared bias", main="variance vs bias of estimators predicting MAP_3", xlim = c(84, 103), xaxp=c(85, 102, 17))
+text(bias.variances.MAP_3, labels = names, pos = c(4,2,3,4,4,3))
+bias.variance.APSE.MAP_3 = cbind(bias.variances.MAP_3, APSE=bias.variances.MAP_3[,1]+bias.variances.MAP_3[,2])
+```
+
+```{r, echo=FALSE, eval=FALSE}
+bias.variances.SBP_3 <- t(cbind(bias.variance.BART.SBP_3, bias.variance.BART2.SBP_3, bias.variance.synth.SBP_3, bias.variance.synCF.SBP_3, bias.variance.BARTsynth.SBP_3, bias.variance.BARTsynth2.SBP_3))
+names <- c("BART", "BART2", "synth", "synCF", "BARTsynth", "BARTsynth2")
+rownames(bias.variances.SBP_3) <- names
+colnames(bias.variances.SBP_3) <- c("bias2", "variance")
+plot(bias.variances.SBP_3, xlab="average squared bias", main="variance vs bias of estimators predicting SBP_3", xlim = c(145, 190), xaxp=c(150, 190, 4))
+text(bias.variances.SBP_3, labels = names, pos = c(2,4,2,2,4,3))
+bias.variance.APSE.SBP_3 = cbind(bias.variances.SBP_3, APSE=bias.variances.SBP_3[,1]+bias.variances.SBP_3[,2])
+```
+
+```{r, echo=FALSE, eval=FALSE}
+bias.variances.RR_1 <- t(cbind(bias.variance.BART.RR_1, bias.variance.BART2.RR_1, bias.variance.synth.RR_1, bias.variance.synCF.RR_1, bias.variance.BARTsynth.RR_1, bias.variance.BARTsynth2.RR_1))
+names <- c("BART", "BART2", "synth", "synCF", "BARTsynth", "BARTsynth2")
+rownames(bias.variances.RR_1) <- names
+colnames(bias.variances.RR_1) <- c("bias2", "variance")
+plot(bias.variances.RR_1, xlab="average squared bias", main="variance vs bias of estimators predicting RR_1", xlim = c(26, 33), xaxp=c(27, 32, 5))
+text(bias.variances.RR_1, labels = names, pos = c(2,2,2,2,4,3))
+bias.variance.APSE.RR_1 = cbind(bias.variances.RR_1, APSE=bias.variances.RR_1[,1]+bias.variances.RR_1[,2])
+```
+
+```{r, echo=FALSE, eval=FALSE}
+bias.variances.TV_1 <- t(cbind(bias.variance.BART.TV_1, bias.variance.BART2.TV_1, bias.variance.synth.TV_1, bias.variance.synCF.TV_1, bias.variance.BARTsynth.TV_1, bias.variance.BARTsynth2.TV_1))
+names <- c("BART", "BART2", "synth", "synCF", "BARTsynth", "BARTsynth2")
+rownames(bias.variances.TV_1) <- names
+colnames(bias.variances.TV_1) <- c("bias2", "variance")
+plot(bias.variances.TV_1, xlab="average squared bias", main="variance vs bias of estimators predicting TV_1", xlim = c(124100, 132900), xaxp=c(124200, 132800, 5))
+text(bias.variances.TV_1, labels = names, pos = c(4,2,2,2,2,3))
+bias.variance.APSE.TV_1 = cbind(bias.variances.TV_1, APSE=bias.variances.TV_1[,1]+bias.variances.TV_1[,2])
+```
+
+```{r, echo=FALSE, eval=FALSE}
+bias.variances.TV_1.5 <- t(cbind(bias.variance.BART.TV_1.5, bias.variance.BART2.TV_1.5, bias.variance.synth.TV_1.5, bias.variance.synCF.TV_1.5, bias.variance.BARTsynth.TV_1.5, bias.variance.BARTsynth2.TV_1.5))
+names <- c("BART", "BART2", "synth", "synCF", "BARTsynth", "BARTsynth2")
+rownames(bias.variances.TV_1.5) <- names
+colnames(bias.variances.TV_1.5) <- c("bias2", "variance")
+plot(bias.variances.TV_1.5, xlab="average squared bias", main="variance vs bias of estimators predicting TV_1^.5", xlim = c(27, 30), xaxp=c(27, 30, 6))
+text(bias.variances.TV_1.5, labels = names, pos = c(2,4,2,4,4,3))
+bias.variance.APSE.TV_1.5 = cbind(bias.variances.TV_1.5, APSE=bias.variances.TV_1.5[,1]+bias.variances.TV_1.5[,2])
+```
