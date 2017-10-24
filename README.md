@@ -4,6 +4,8 @@ estimation of individual causal effects with nonbinary treatments, and on data w
 possible. For this purpose, data from a small randomized, cross-over, controlled trial is used. In general, of
 those methods evaluated, BART performed the best on the dataset.
 
+Written in R with R Markdown. 
+
 # References
 Alaa, Ahmed M, and Mihaela van der Schaar. 2017. “Bayesian Inference of Individualized Treatment Effects
 Using Multi-Task Gaussian Processes.” ArXiv Preprint ArXiv:1704.02801.
