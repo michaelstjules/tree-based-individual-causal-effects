@@ -38,6 +38,7 @@ BioMed Central: 28.
 
 Lu, Min, Saad Sadiq, Daniel J Feaster, and Hemant Ishwaran. 2017. “Estimating Individual Treatment
 Effect in Observational Data Using Random Forest Methods.” ArXiv Preprint ArXiv:1701.05306.
+
 Shalit, Uri, Fredrik Johansson, and David Sontag. 2016. “Estimating Individual Treatment Effect: Generalization
 Bounds and Algorithms.” ArXiv Preprint ArXiv:1606.03976.
 
