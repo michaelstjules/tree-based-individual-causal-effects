@@ -139,11 +139,11 @@ treatment_dist <- function(x){
   x.POS <- as.integer(runif(nrow(x)) <= pPOS1_EXP(x.EXP))
   data.frame(EXP=x.EXP,POS=x.POS)
   # At least three possibilities for dealing with missing treatments in data:
-  # (1) not care that some responses will be missing for some treatments (OK for trees?)
+  # (1) not care that some responses will be missing for some treatments (OK for trees)
   # (2) keep reassigning until a valid treatment is obtained
   # (3) "round" to the nearest treatment:
   # If (0,0) or (1,1) is obtained but missing, flip a coin between (1,0) and (0,1),
-  #  favouring (0,1) (e.g. 2/3) ?
+  #  favouring (0,1) (e.g. 2/3)
   # If (0,1) or (1,0) is obtained but missing, flip to the other
   
   # For now, I'm using (1)
@@ -169,7 +169,6 @@ getSample <- function(y_name="RR_1", x.=x, data.=data,
   }
     
   cbind(x.[,names(x.) != "SUBJ"],t,y) #remove SUBJ
-  #should x and t be combined into one variable?
 }
 
 ```
@@ -345,8 +344,6 @@ bias2_mutilde2 <- function(Ssamples, Tsamples, df, getmuhat){
 
 Get samples
 
-## Want 100 samples???
-
 ```{r}
 set.seed(314159)
 TrainingSets <- lapply(1:50, FUN= function(i){
@@ -367,13 +364,6 @@ getmuhat.BART <- function(sample, df){
   muhat <- function(x){bart(x.train=sample[,names(sample)!="y"], y.train=sample$y,
                             x.test=x,verbose=FALSE)$yhat.test.mean}
 }
-
-#would like to use usequants=FALSE for treatment variables, but true for everything else?
-# FALSE by default; also try TRUE?
-# since only 2x2 binary treatments, it's fine to use usequants=TRUE
-#Is there a way to set a maximum iteration number (and either stop early and keep the result
-# or restart?)
-# numcut? 
 ```
 
 
@@ -545,7 +535,6 @@ getmuhat.BARTsynth <- function(sample, df){
     BARTsynth$yhat.test.mean
   }
 }
-#use usequants=TRUE ??
 ```
 
 
@@ -596,7 +585,6 @@ getmuhat.BARTsynth2 <- function(sample, df){
     BARTsynth$yhat.test.mean
   }
 }
-#use usequants=TRUE ??
 ```
 
 
